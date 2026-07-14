@@ -1,18 +1,18 @@
-# CROX Options Chain Fetcher – Einrichtung & Ausführung
+# Options Chain Fetcher – Einrichtung & Ausführung
 
-Dieses Dokument enthält die Schritt‑für‑Schritt‑Anleitung, um das Projekt zu klonen, eine Python‑Virtuelle Umgebung (`.venv`) zu erstellen und die Option‑Chain‑Analyse auszuführen. 
+Dieses Dokument enthält die Schritt‑für‑Schritt‑Anleitung, um das Projekt zu klonen, eine Python‑Virtuelle Umgebung (`.venv`) zu erstellen und die Option‑Chain‑Analyse für ein beliebiges Ticker‑Symbol auszuführen.
 
 ---
 
 ## 1. Projekt klonen
 
 ```bash
-# Ersetze <dein‑username> durch deinen GitHub‑Benutzernamen
+# Ersetze <dein-username> durch deinen GitHub‑Benutzernamen
 git clone https://github.com/<dein-username>/trex_options_18days.git
 cd trex_options_18days
 ```
 
-> **Hinweis:** Das Repository muss already on your GitHub account verbunden sein. Wenn du es noch nicht erstellt hast, erstelle es zuerst auf GitHub und füge dann die Remote‑URL ein.
+> **Hinweis:** Das Repository muss bereits auf deinem GitHub‑Konto vorhanden sein. Falls du es noch nicht erstellt hast, lege es zuerst auf GitHub an und füge dann die Remote‑URL hinzu.
 
 ---
 
@@ -43,12 +43,13 @@ Sobald die Umgebung aktiv ist, erscheint `( .venv )` am Anfang deiner Shell‑Ze
 
 ## 4. Benötigte Pakete installieren
 
-Das Projekt verwendet das Paket `ib_insync` zum Ansprechen von Interactive Brokers.  
-Erstelle (oder ergänze) eine `requirements.txt`‑Datei im Projektstamm mit:
+Das Projekt verwendet das Paket `ib_insync` zum Ansprechen von Interactive Brokers sowie `pandas` (optional für weiterführende Auswertungen).  
+Stelle sicher, dass eine `requirements.txt` im Projektstamm existiert (sie sollte bereits angelegt sein):
 
 ```text
-ib_insync>=0.99
-pandas>=2.0
+ib_insync>=0.9.70
+pandas>=2.1.0
+urllib3>=2.0.0
 ```
 
 Installiere anschließend alle Abhängigkeiten:
@@ -63,18 +64,28 @@ pip install -r requirements.txt
 
 ## 5. Skript ausführen – Option‑Chain CSV erzeugen
 
+Das zentrale Skript ist `src/fetch_options_chain.py`. Es nimmt das Ticker‑Symbol als **ersten Kommandozeilen‑Parameter** entgegen und erzeugt eine CSV‑Datei mit Put‑Optionen, die mindestens 18 Tage bis zum Ablaufdatum haben.
+
 ```bash
 # Aktivierte .venv‑Umgebung vorausgesetzt
-python src/crox_options_chain.py
+python src/fetch_options_chain.py <TICKER>
+```
+
+**Beispiele**
+
+```bash
+python src/fetch_options_chain.py PLTR   # für Palantir
+python src/fetch_options_chain.py MU     # für Micron
+python src/fetch_options_chain.py CROX   # für Crocs (ursprüngliches Beispiel)
 ```
 
 Der Aufruf des Skripts führt folgende Schritte aus:
 
-1. **Marktopen‑Check** – prüft, ob der US‑Aktienmarkt geöffnet ist.  
-2. **Option‑Contracts abrufen** – holt alle CROX‑Put‑Contracts mit ≥ 18 Tagen bis zur expiry.  
-3. **Marktdaten‑Abruf** – holt aktuelle Bid/Ask‑Preise, Greeks, Volume, Open‑Interest usw.  
+1. **Marktopen‑Check** – prüft, ob der US‑Aktienmarkt geöffnet ist (ET 09:30‑16:00, Werktage).  
+2. **Option‑Contracts abrufen** – holt alle Put‑Contracts des angegebenen Tickers mit ≥ 18 Tagen bis zur expiry.  
+3. **Marktdaten‑Abruf** – holt aktuelle Bid/Ask‑Preise, Greeks, Volume, Open‑Interest usw. (Snapshot‑Modus).  
 4. **Validierung & Fehlerbehandlung** – überspringt ungültige Daten und loggt Probleme.  
-5. **CSV‑Export** – speichert die gesammelten Daten in `crox_options_18days.csv` im Projektstamm.
+5. **CSV‑Export** – speichert die gesammelten Daten in `<ticker_lower>_options_18days.csv` im Projektstamm.
 
 ---
 
@@ -83,8 +94,10 @@ Der Aufruf des Skripts führt folgende Schritte aus:
 Nach erfolgreicher Ausführung findest du die generierte Datei:
 
 ```
-crox_options_18days.csv
+<ticker>_options_18days.csv
 ```
+
+**Beispiel:** Für `PLTR` entsteht die Datei `pltr_options_18days.csv`.
 
 Öffne sie mit Excel, LibreOffice Calc oder einem Text‑Editor, um die Option‑Daten zu analysieren.
 
@@ -113,4 +126,4 @@ rm -rf .venv
 
 ### 🎉 Du bist fertig!
 
-Mit diesen Schritten hast du das Projekt vollständig eingerichtet, die virtuelle Umgebung konfiguriert und die Option‑Chain‑Analyse erfolgreich ausgeführt. Viel Erfolg beim further Exploring! 🚀
+Mit diesen Schritten hast du das Projekt vollständig eingerichtet, die virtuelle Umgebung konfiguriert und die Option‑Chain‑Analyse für ein beliebiges Ticker‑Symbol erfolgreich ausgeführt. Viel Erfolg beim weiteren Erkennen ausgeführt. Viel Erfolg beim weiteren Erkunden! 🚀
