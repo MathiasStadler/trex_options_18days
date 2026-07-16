@@ -1,37 +1,44 @@
 #!/usr/bin/env python3
 """
-SPY Options Chain Fetcher - Min 18 Tage, dynamische Strike-Auswahl
-Fetches put options with bid/ask, delta, gamma, theta, volume, open_interest
+SPY Options Chain Fetcher - Min 18 Tage, ITM/OTM Calls & Puts
+Fetches ITM and OTM options for both CALL and PUT sides
 Uses TWS socket API (Port 7496) via ib_insync
-Supports flags:
-  --csv  → Save the options CSV file (default behavior)
-  --md   → Create a Markdown document with the options chain
-Example:
-  python spy_options_chain.py SPY --md   # only Markdown output (file created)
-  python spy_options_chain.py SPY --csv  # only CSV (default)
-  python spy_options_chain.py SPY --md --csv  # both
+
+Flags:
+  --csv   Speichert CSV (Default wenn kein Flag)
+  --md    Erstellt Markdown
+  --all   Alle Strikes statt ITM/OTM-Filter
+  --test  Kleiner Testlauf (1 Expiry, 6 Strikes) fuer schnelle Verifikation
+
+Beispiele:
+  python tws_get_options_chain_hernes2.py SPY --md --csv
+  python tws_get_options_chain_hernes2.py SPY --test
 """
 
 import sys
 import csv
-import time
+import argparse
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
-# ib_insync-Pfad
-SYSPATH = '/home/hermes/.hermes/hermes-agent/venv/lib/python3.11/site-packages'
-if SYSPATH not in sys.path:
-    sys.path.insert(0, SYSPATH)
-
-from ib_insync import IB, Stock, Option
+# ib_insync import (venv oder Fallback-Pfad)
+try:
+    from ib_insync import IB, Stock, Option
+except ImportError:
+    SYSPATH = '/home/hermes/.hermes/hermes-agent/venv/lib/python3.11/site-packages'
+    if SYSPATH not in sys.path:
+        sys.path.insert(0, SYSPATH)
+    from ib_insync import IB, Stock, Option
 
 # Konfiguration
 TWS_HOST = '127.0.0.1'
 TWS_PORT = 7496
-CLIENT_ID = 38
-MARKET_DATA_TYPE = 3  # Delayed data for Paper Trading
+CLIENT_ID = 39
+MARKET_DATA_TYPE = 3  # Delayed (Paper Trading)
 
-# Hilfsfunktionen (identisch zu den vorherigen Versionen)
+# ----------------------------------------------------------------------
+# Hilfsfunktionen
+# ----------------------------------------------------------------------
 def safe_float(v) -> Optional[float]:
     if v is None:
         return None
@@ -45,204 +52,267 @@ def safe_int(v) -> Optional[int]:
     f = safe_float(v)
     return int(f) if f is not None else None
 
+def is_market_open(ib: IB) -> bool:
+    """Prueft ob US-Markt offen ist (Regular Trading Hours, Mo-Fr 9:30-16:00 ET)."""
+    try:
+        import zoneinfo
+        server_time = ib.reqCurrentTime()
+        tz = zoneinfo.ZoneInfo('US/Eastern')
+        et = server_time.astimezone(tz)
+        if et.weekday() >= 5:
+            return False
+        open_t = et.replace(hour=9, minute=30, second=0, microsecond=0)
+        close_t = et.replace(hour=16, minute=0, second=0, microsecond=0)
+        return open_t <= et <= close_t
+    except Exception:
+        return True  # Fallback: trotzdem versuchen
+
+def get_stock_price_with_retry(ib: IB, stock: Stock, max_attempts: int = 3) -> Optional[float]:
+    """Holt Aktienkurs mit exponentiellem Backoff (3s, 6s, 12s)."""
+    for attempt in range(1, max_attempts + 1):
+        ticker = ib.reqMktData(stock, snapshot=True)
+        delay = 3 * (2 ** (attempt - 1))
+        ib.sleep(delay)
+        price = safe_float(ticker.last)
+        if price is not None and price > 0:
+            return price
+        print(f"  Preis-Versuch {attempt}/{max_attempts} fehlgeschlagen, retry in {delay}s...")
+    return None
+
 # ----------------------------------------------------------------------
-# Hauptfunktion – verarbeitet einen einzelnen Ticker
+# Hauptfunktion
 # ----------------------------------------------------------------------
-def process_ticker(ticker_symbol: str, out_md: bool = False, out_csv: bool = False):
+def process_ticker(ticker_symbol: str, out_md: bool = False, out_csv: bool = False,
+                   include_all: bool = False, is_test: bool = False):
     ib = IB()
     try:
-        # 1️⃣ Verbindung zum TWS aufbauen
-        ib.connect(TWS_HOST, TWS_PORT, clientId=CLIENT_ID)
+        ib.connect(TWS_HOST, TWS_PORT, clientId=CLIENT_ID, timeout=20)
         ib.reqMarketDataType(MARKET_DATA_TYPE)
-        print("Verbindung zu TWS hergestellt")
+        print("[OK] Verbindung zu TWS hergestellt")
 
-        # 2️⃣ Underlying qualifizieren
+        if not is_market_open(ib):
+            print("[WARN] Markt geschlossen - fahre trotzdem fort (delayed Daten)")
+
+        # Underlying qualifizieren
         stock = Stock(ticker_symbol, 'SMART', 'USD')
         ib.qualifyContracts(stock)
-        print(f"{ticker_symbol} conId: {stock.conId}")
+        print(f"[OK] {ticker_symbol} conId: {stock.conId}")
 
-        # 3️⃣ Aktuellen Kurs holen (Snapshot)
-        stock_ticker = ib.reqMktData(stock, snapshot=True)
-        ib.sleep(3)
-        current_price = safe_float(stock_ticker.last)
+        # Aktueller Kurs
+        current_price = get_stock_price_with_retry(ib, stock)
         if current_price is None or current_price <= 0:
-            print(f"Kein gueltiger Marktpreis fuer {ticker_symbol}, Abbruch")
-            return None
-        print(f"Aktueller {ticker_symbol} Kurs: ${current_price:.2f}")
+            print("[ERR] Kein gueltiger Marktpreis")
+            return False
+        print(f"[OK] Aktueller Kurs: ${current_price:.2f}")
 
-        # 4️⃣ Optionen-Parameter holen
+        # Optionen-Parameter
         chains = ib.reqSecDefOptParams(stock.symbol, '', stock.secType, stock.conId)
         if not chains:
-            print("Keine Optionen-Kette gefunden")
-            return None
+            print("[ERR] Keine Optionskette")
+            return False
         chain = chains[0]
-        print(f"Chain: {chain.exchange}, {chain.tradingClass}, Strikes: {len(chain.strikes)}")
+        print(f"[OK] Chain: {chain.exchange}, Strikes gesamt: {len(chain.strikes)}")
 
-        # 5️⃣ Verfallsdaten >= 18 Tage auswählen
+        # Verfallsdaten >= 18 Tage
         today = datetime.now()
-        valid_expirations = []
+        valid_exps = []
         for exp in chain.expirations:
             try:
-                exp_date = datetime.strptime(exp, '%Y%m%d')
-                dte = (exp_date - today).days
+                dte = (datetime.strptime(exp, '%Y%m%d') - today).days
                 if dte >= 18:
-                    valid_expirations.append(exp)
+                    valid_exps.append(exp)
             except Exception:
                 continue
-        if not valid_expirations:
-            print("Keine Verfallsdaten mit >= 18 Tagen")
-            return None
-        selected_exps = valid_expirations[:3]
-        print(f"Verfallsdaten (>=18d): {selected_exps[:3]}")
+        if not valid_exps:
+            print("[ERR] Keine Verfallsdaten >= 18 Tage")
+            return False
 
-        # 6️⃣ Dynamische Strike-Auswahl (±15 % um den Kurs)
-        min_strike = int(current_price * 0.85)
-        max_strike = int(current_price * 1.15)
-        strikes = sorted([s for s in chain.strikes if min_strike <= s <= max_strike])[:15]
-        print(f"Strikes ({len(strikes)}): {strikes}")
+        # Anzahl Expirations beschraenken
+        if is_test:
+            selected_exps = valid_exps[:1]
+        else:
+            selected_exps = valid_exps[:3]
+        print(f"[OK] Verfallsdaten (>=18d): {selected_exps}")
 
-        # 7️⃣ Put-Contracts sammeln
-        all_contracts = []
+        # Strike-Auswahl
+        if include_all:
+            strikes = sorted(chain.strikes)
+        else:
+            # ITM/OTM Band: +-30% um Kurs, aber gueltige SPY-Strikes (1er-Schritte)
+            lo = int((current_price * 0.70) // 1)
+            hi = int((current_price * 1.30) // 1)
+            # Nur ganzzahlige Strikes die in der Kette existieren
+            all_strikes = sorted(chain.strikes)
+            strikes = [s for s in all_strikes if lo <= s <= hi and float(s).is_integer()]
+
+        # Begrenzung der Strike-Anzahl fuer Performance/Stabilitaet
+        if is_test:
+            # Zentral um den Kurs herum, je 3 ITM + 3 OTM
+            strikes_above = [s for s in strikes if s >= current_price]
+            strikes_below = [s for s in strikes if s < current_price]
+            chosen = (strikes_below[-3:] if len(strikes_below) >= 3 else strikes_below) + \
+                     (strikes_above[:3] if len(strikes_above) >= 3 else strikes_above)
+            strikes = sorted(set(chosen))
+        else:
+            # Max 20 Strikes zentral um Kurs
+            if len(strikes) > 20:
+                mid = min(strikes, key=lambda s: abs(s - current_price))
+                idx = strikes.index(mid)
+                lo_i = max(0, idx - 10)
+                hi_i = min(len(strikes), idx + 10)
+                strikes = strikes[lo_i:hi_i]
+        print(f"[OK] {len(strikes)} Strikes ausgewaehlt: {strikes}")
+
+        # Contracts sammeln (Call + Put pro Strike/Expiry)
+        contracts = []
         for exp in selected_exps:
             for strike in strikes:
-                contract = Option(ticker_symbol, exp, strike, 'P', 'SMART', tradingClass=ticker_symbol)
-                all_contracts.append(contract)
+                contracts.append(Option(ticker_symbol, exp, strike, 'C', 'SMART', tradingClass=ticker_symbol))
+                contracts.append(Option(ticker_symbol, exp, strike, 'P', 'SMART', tradingClass=ticker_symbol))
 
-        print(f"Qualifiziere {len(all_contracts)} Put-Contracts...")
-        qualified = ib.qualifyContracts(*all_contracts)
-        print(f"{len(qualified)} Contracts qualifiziert")
+        print(f"[..] Qualifiziere {len(contracts)} Contracts...")
+        # Qualifizierung in Batches (je 25) zur Stabilitaet
+        qualified = []
+        batch_size = 25
+        for i in range(0, len(contracts), batch_size):
+            batch = contracts[i:i + batch_size]
+            try:
+                q = ib.qualifyContracts(*batch)
+                qualified.extend([c for c in q if c is not None])
+            except Exception as e:
+                print(f"  [WARN] Batch {i//batch_size} Fehler: {e}")
+        # Fallback: unqualifizierte ueberspringen
+        qualified = [c for c in qualified if c is not None and getattr(c, 'conId', None)]
+        print(f"[OK] {len(qualified)} Contracts qualifiziert")
 
-        # 8️⃣ Marktdaten (Snapshot) holen
-        tickers = []
+        if not qualified:
+            print("[ERR] Keine gueltigen Contracts")
+            return False
+
+        # Marktdaten holen (kein snapshot, da delayed Daten besser via Stream)
+        print(f"[..] Fordere Marktdaten an ({len(qualified)} Contracts)...")
+        tickers_map = {}
         for c in qualified:
-            t = ib.reqMktData(c, snapshot=True)
-            tickers.append(t)
-        ib.sleep(10)
+            t = ib.reqMktData(c)  # kein snapshot -> stream
+            tickers_map[c] = t
+        ib.sleep(12)  # Warte auf Daten
 
-        # 9️⃣ Daten sammeln
+        # Daten sammeln
         rows = []
-        for t in tickers:
-            c = t.contract
+        for c, t in tickers_map.items():
             bid = safe_float(t.bid)
             ask = safe_float(t.ask)
             last = safe_float(t.last)
             volume = safe_int(t.volume)
-            oi = safe_int(getattr(t, 'putOpenInterest', None) or getattr(t, 'callOpenInterest', None))
-
-            delta = gamma = theta = None
-            if hasattr(t, 'modelGreeks') and t.modelGreeks:
+            oi = safe_int(getattr(t, 'putOpenInterest', None))
+            delta = gamma = theta = vega = None
+            if getattr(t, 'modelGreeks', None):
                 g = t.modelGreeks
                 delta = safe_float(getattr(g, 'delta', None))
                 gamma = safe_float(getattr(g, 'gamma', None))
                 theta = safe_float(getattr(g, 'theta', None))
+                vega = safe_float(getattr(g, 'vega', None))
 
+            is_itm = (c.strike < current_price) if c.right == 'C' else (c.strike > current_price)
+            moneyness = 'ITM' if is_itm else 'OTM'
             ask_strike_ratio = round((ask / c.strike) * 100, 4) if (ask and c.strike) else None
 
-            row: Dict[str, Any] = {
-                'conid': c.conId,
-                'symbol': c.symbol,
-                'right': c.right,
-                'strike': c.strike,
-                'expiry': c.lastTradeDateOrContractMonth,
-                'bid': bid,
-                'ask': ask,
-                'last': last,
-                'volume': volume,
-                'open_interest': oi,
-                'delta': delta,
-                'gamma': gamma,
-                'theta': theta,
+            rows.append({
+                'conid': c.conId, 'symbol': c.symbol, 'right': c.right,
+                'strike': c.strike, 'expiry': c.lastTradeDateOrContractMonth,
+                'moneyness': moneyness, 'bid': bid, 'ask': ask, 'last': last,
+                'volume': volume, 'open_interest': oi,
+                'delta': delta, 'gamma': gamma, 'theta': theta, 'vega': vega,
                 'ask_strike_ratio': ask_strike_ratio,
-            }
-            rows.append(row)
+            })
 
-        # Sortieren nach Strike für konsistente Reihenfolge
-        rows.sort(key=lambda r: float(r['strike']))
+        rows.sort(key=lambda r: (0 if r['right'] == 'C' else 1,
+                                 0 if r['moneyness'] == 'ITM' else 1,
+                                 float(r['strike'])))
 
-        # --------------------------------------------------------------
-        # CSV-Ausgabe (falls gewünscht)
-        # --------------------------------------------------------------
+        # CSV
         if out_csv:
             out_path = f"/home/hermes/{ticker_symbol.lower()}_options_18days.csv"
-            fieldnames = ['conid', 'symbol', 'right', 'strike', 'expiry',
-                          'bid', 'ask', 'last', 'volume', 'open_interest',
-                          'delta', 'gamma', 'theta', 'ask_strike_ratio']
+            cols = ['conid', 'symbol', 'right', 'strike', 'expiry', 'moneyness',
+                    'bid', 'ask', 'last', 'volume', 'open_interest',
+                    'delta', 'gamma', 'theta', 'vega', 'ask_strike_ratio']
             with open(out_path, 'w', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(rows)
-            print(f"CSV gespeichert: {out_path}")
-            print(f"{len(rows)} Put-Optionen")
+                w = csv.DictWriter(f, fieldnames=cols)
+                w.writeheader()
+                w.writerows(rows)
+            print(f"[OK] CSV: {out_path} ({len(rows)} Optionen)")
 
-        # 12️⃣ Markdown-Ausgabe (falls angefordert)
+        # Markdown
         if out_md:
-            md_lines = []
-            md_lines.append(f"# {ticker_symbol} – Options‑Chain (Min. 18 Tage)")
-            md_lines.append("")
-            md_lines.append("## Zusammenfassung")
-            md_lines.append(f"- **Aktueller Kurs:** ${current_price:.2f}")
-            md_lines.append(f"- **Verfallsdaten (≥ 18 Tage):** {', '.join(selected_exps)}")
-            md_lines.append(f"- **Strikes (15 Stk., ±15 % um den Kurs):** {strikes}")
-            md_lines.append("")
-            md_lines.append("## Put‑Options‑Chain")
-            md_lines.append("")
-            md_lines.append("### Chain‑Informationen")
-            md_lines.append(f"- **Exchange:** {chain.exchange}")
-            md_lines.append(f"- **Trading‑Class:** {chain.tradingClass}")
-            md_lines.append(f"- **Anzahl verfügbarer Strikes:** {len(chain.strikes)}")
-            md_lines.append(f"- **Verfügbare Verfallsdaten:** {', '.join(chain.expirations)}")
-            md_lines.append("")
-
-            md_lines.append("## Put‑Options‑Chain – Detailtabelle")
-            md_lines.append("")
-            md_lines.append("| Expiry | Strike | Bid | Ask | Delta | Gamma | Theta | Vol |")
-            md_lines.append("|--------|-------|-----|-----|-------|-------|-------|-----|")
-            for row in rows:
-                bid_str = f"{row['bid']:>6}" if row['bid'] is not None else "   None"
-                ask_str = f"{row['ask']:>5}" if row['ask'] is not None else "  None"
-                delta_str = f"{row['delta']:>8}" if row['delta'] is not None else "      None"
-                gamma_str = f"{row['gamma']:>5}" if row['gamma'] is not None else "   None"
-                theta_str = f"{row['theta']:>5}" if row['theta'] is not None else "   None"
-                vol_str = f"{row['volume']:>8}" if row['volume'] is not None else "     None"
-                md_lines.append(
-                    f"| {str(row['expiry']):<12} | {row['strike']:>7.1f} | "
-                    f"{bid_str} | {ask_str} | {delta_str} | {gamma_str} | {theta_str} | {vol_str} |"
-                )
+            lines = [f"# {ticker_symbol} – Options-Chain (Min. 18 Tage)",
+                     "", "## Zusammenfassung",
+                     f"- Aktueller Kurs: ${current_price:.2f}",
+                     f"- Verfallsdaten: {', '.join(selected_exps)}",
+                     f"- Strikes: {len(strikes)} | Optionen gesamt: {len(rows)}", ""]
+            cats = {
+                'Calls ITM': [r for r in rows if r['right'] == 'C' and r['moneyness'] == 'ITM'],
+                'Calls OTM': [r for r in rows if r['right'] == 'C' and r['moneyness'] == 'OTM'],
+                'Puts ITM':  [r for r in rows if r['right'] == 'P' and r['moneyness'] == 'ITM'],
+                'Puts OTM':  [r for r in rows if r['right'] == 'P' and r['moneyness'] == 'OTM'],
+            }
+            lines.append("## Kategorien")
+            lines.append("")
+            lines.append("| Kategorie | Anzahl |")
+            lines.append("|-----------|--------|")
+            for k, v in cats.items():
+                lines.append(f"| {k} | {len(v)} |")
+            lines.append("")
+            for title, key in [("📈 Calls", 'C'), ("📉 Puts", 'P')]:
+                sub = [r for r in rows if r['right'] == key]
+                if not sub:
+                    continue
+                lines.append(f"## {title}")
+                lines.append("")
+                lines.append("| Moneyness | Expiry | Strike | Bid | Ask | Delta | Gamma | Theta | Vol |")
+                lines.append("|-----------|--------|--------|-----|-----|-------|-------|-------|-----|")
+                for r in sub:
+                    def fmt(v, w):
+                        return f"{v:>{w}}" if v is not None else " " * (w-2) + "NA"
+                    lines.append(
+                        f"| {r['moneyness']:<11} | {str(r['expiry']):<12} | {r['strike']:>7.1f} | "
+                        f"{fmt(r['bid'],6)} | {fmt(r['ask'],5)} | {fmt(r['delta'],7)} | "
+                        f"{fmt(r['gamma'],5)} | {fmt(r['theta'],5)} | {fmt(r['volume'],6)} |"
+                    )
+                lines.append("")
             md_path = f"/home/hermes/{ticker_symbol.lower()}_options_18days.md"
-            with open(md_path, "w", encoding="utf-8") as f:
-                f.write("\n".join(md_lines))
-            print(f"Markdown gespeichert: {md_path}")
+            with open(md_path, 'w', encoding='utf-8') as f:
+                f.write("\n".join(lines))
+            print(f"[OK] Markdown: {md_path}")
 
+        # Kurzes Summary auf Konsole
+        print("\n=== SUMMARY ===")
+        print(f"Kurs: ${current_price:.2f} | Optionen: {len(rows)}")
+        for k, v in cats.items():
+            print(f"  {k}: {len(v)}")
         return True
 
     except Exception as e:
-        print(f"Fehler: {e}")
+        print(f"[ERR] {e}")
         import traceback
         traceback.print_exc()
         return False
     finally:
-        ib.disconnect()
-        print("Verbindung geschlossen")
+        try:
+            ib.disconnect()
+        except Exception:
+            pass
+        print("[OK] Verbindung geschlossen")
 
-# ----------------------------------------------------------------------
-# Argument-Parser – Flags und Ticker
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
-    args = sys.argv[1:]
-    flag_csv = "--csv" in args
-    flag_md = "--md" in args
+    parser = argparse.ArgumentParser(description="Options Chain Fetcher ITM/OTM Calls & Puts")
+    parser.add_argument('ticker', help='Ticker (z.B. SPY)')
+    parser.add_argument('--csv', action='store_true')
+    parser.add_argument('--md', action='store_true')
+    parser.add_argument('--all', action='store_true', help='Alle Strikes')
+    parser.add_argument('--test', action='store_true', help='Kleiner Testlauf')
+    a = parser.parse_args()
 
-    # Ticker ist das erste Argument, das nicht mit '--' beginnt
-    ticker = None
-    for a in args:
-        if a not in ("--csv", "--md"):
-            ticker = a
-            break
-
-    if not ticker:
-        print("Usage: python spy_options_chain.py <TICKER> [--csv|--md] ...")
-        print("If no flag is provided, CSV is generated by default.")
-        sys.exit(1)
-
-    # Aufruf mit den Flags
-    process_ticker(ticker, out_md=flag_md, out_csv=flag_csv)
+    out_csv = a.csv or (not a.md and not a.test)
+    out_md = a.md
+    process_ticker(a.ticker, out_md=out_md, out_csv=out_csv, include_all=a.all, is_test=a.test)
