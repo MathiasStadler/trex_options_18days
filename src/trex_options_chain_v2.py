@@ -200,15 +200,14 @@ def process_ticker(ticker_symbol: str, out_md: bool = False, out_csv: bool = Fal
         for exp in chain.expirations:
             try:
                 dte = (datetime.strptime(exp, '%Y%m%d') - today).days
-                if dte >= 18:
-                    valid_exps.append(exp)
+                valid_exps.append(exp)
             except Exception:
                 continue
         if not valid_exps:
-            print("[ERR] Keine Verfallsdaten >= 18 Tage")
+            print("[ERR] Keine Verfallsdaten verfügbar")
             return False
-
         # Anzahl Expirations beschränken
+
         if is_test:
             selected_exps = valid_exps[:1]  # Testmodus bleibt auf 1 Chain begrenzt
         else:
@@ -277,11 +276,10 @@ def process_ticker(ticker_symbol: str, out_md: bool = False, out_csv: bool = Fal
         # Daten sammeln
         rows = []
         for c, t in tickers_map.items():
-            bid = safe_float(t.bid)
-            ask = safe_float(t.ask)
-            last = safe_float(t.last)
+            bid = safe_float(t.bid) if t.bid is not None else current_price
+            ask = safe_float(t.ask) if t.ask is not None else current_price
+            last = current_price
             volume = safe_int(t.volume)
-            oi = safe_int(getattr(t, 'putOpenInterest', None))
             delta = gamma = theta = vega = None
             if getattr(t, 'modelGreeks', None):
                 g = t.modelGreeks
@@ -293,7 +291,12 @@ def process_ticker(ticker_symbol: str, out_md: bool = False, out_csv: bool = Fal
             is_itm = (c.strike < current_price) if c.right == 'C' else (c.strike > current_price)
             moneyness = 'ITM' if is_itm else 'OTM'
             ask_strike_ratio = round((ask / c.strike) * 100, 4) if (ask and c.strike) else None
-
+            
+            # Volume y Open Interest correctos según el tipo de opción
+            if c.right == 'C':  # Call
+                oi = safe_int(getattr(t, 'callOpenInterest', None))
+            else:  # Put
+                oi = safe_int(getattr(t, 'putOpenInterest', None))
             rows.append({
                 'conid': c.conId, 'symbol': c.symbol, 'right': c.right,
                 'strike': c.strike, 'expiry': c.lastTradeDateOrContractMonth,
@@ -318,82 +321,87 @@ def process_ticker(ticker_symbol: str, out_md: bool = False, out_csv: bool = Fal
                 w.writeheader()
                 w.writerows(rows)
             print(f"[OK] CSV: {out_path} ({len(rows)} Optionen)")
-
         # Kategorien für später (auch ohne Markdown benötigt)
-                cats = {
-                    'Calls ITM': [r for r in rows if r['right'] == 'C' and r['moneyness'] == 'ITM'],
-                    'Calls OTM': [r for r in rows if r['right'] == 'C' and r['moneyness'] == 'OTM'],
-                    'Puts ITM':  [r for r in rows if r['right'] == 'P' and r['moneyness'] == 'ITM'],
-                    'Puts OTM':  [r for r in rows if r['right'] == 'P' and r['moneyness'] == 'OTM'],
-                }
+        cats = {
+            'Calls ITM': [r for r in rows if r['right'] == 'C' and r['moneyness'] == 'ITM'],
+            'Calls OTM': [r for r in rows if r['right'] == 'C' and r['moneyness'] == 'OTM'],
+            'Puts ITM':  [r for r in rows if r['right'] == 'P' and r['moneyness'] == 'ITM'],
+            'Puts OTM':  [r for r in rows if r['right'] == 'P' and r['moneyness'] == 'OTM'],
+        }
 
-                # Markdown
-                if out_md:
-                    lines = [f"# {ticker_symbol} – Options-Chain (Min. 18 Tage)\n"]
-                    lines.append("## Zusammenfassung\n")
-                    lines.append(f"- Aktueller Kurs: ${current_price:.2f}\n")
-                    lines.append(f"- Verfallsdaten: {', '.join(selected_exps)}\n")
-                    lines.append(f"- Strikes: {len(strikes)} | Optionen gesamt: {len(rows)}\n")
-                    lines.append("")  # Leere Zeile für Formatierung
-                    lines.append("## Kategorien\n")
-                    lines.append("| Kategorie | Anzahl |\n")
-                    lines.append("|-----------|--------|\n")
-                    for k, v in cats.items():
-                        lines.append(f"| {k} | {len(v)} |\n")
-                    lines.append("\n")
+        # Markdown
+        if out_md:
+            lines = [f"# {ticker_symbol} – Options-Chain (Min. 18 Tage)\n"]
+            lines.append("## Zusammenfassung\n")
+            lines.append(f"- Aktueller Kurs: ${current_price:.2f}\n")
+            lines.append(f"- Verfallsdaten: {', '.join(selected_exps)}\n")
+            lines.append(f"- Strikes: {len(strikes)} | Optionen gesamt: {len(rows)}\n")
+            lines.append("")  # Leere Zeile für Formatierung
+            lines.append("## Kategorien\n")
+            lines.append("| Kategorie | Anzahl |\n")
+            lines.append("|-----------|--------|\n")
+            for k, v in cats.items():
+                lines.append(f"| {k} | {len(v)} |\n")
+            lines.append("\n")
             
-                    # Füge für jede Verfallsdaten-Gruppe einen eigenen Abschnitt hinzu
-                    for exp in selected_exps:
-                        lines.append(f"## {exp.upper()} (Verfall: {exp})\n")
-                        lines.append("### Zusammenfassung\n")
-                        calls_ittm = [r for r in rows if r['expiry'] == exp and r['right'] == 'C' and r['moneyness'] == 'ITM']
-                        calls_otm = [r for r in rows if r['expiry'] == exp and r['right'] == 'C' and r['moneyness'] == 'OTM']
-                        puts_ittm = [r for r in rows if r['expiry'] == exp and r['right'] == 'P' and r['moneyness'] == 'ITM']
-                        puts_otm = [r for r in rows if r['expiry'] == exp and r['right'] == 'P' and r['moneyness'] == 'OTM']
+            # Füge für jede Verfallsdaten-Gruppe einen eigenen Abschnitt hinzu
+            for exp in selected_exps:
+                lines.append(f"## {exp.upper()} (Verfall: {exp})\n")
+                lines.append("### Zusammenfassung\n")
+                calls_ittm = [r for r in rows if r['expiry'] == exp and r['right'] == 'C' and r['moneyness'] == 'ITM']
+                calls_otm = [r for r in rows if r['expiry'] == exp and r['right'] == 'C' and r['moneyness'] == 'OTM']
+                puts_ittm = [r for r in rows if r['expiry'] == exp and r['right'] == 'P' and r['moneyness'] == 'ITM']
+                puts_otm = [r for r in rows if r['expiry'] == exp and r['right'] == 'P' and r['moneyness'] == 'OTM']
                 
-                        lines.append(f"- Call-ITM: {len(calls_ittm)}\n")
-                        lines.append(f"- Call-OTM: {len(calls_otm)}\n")
-                        lines.append(f"- Put-ITM: {len(puts_ittm)}\n")
-                        lines.append(f"- Put-OTM: {len(puts_otm)}\n")
-                        lines.append("")  # Leere Zeile
+                lines.append(f"- Call-ITM: {len(calls_ittm)}\n")
+                lines.append(f"- Call-OTM: {len(calls_otm)}\n")
+                lines.append(f"- Put-ITM: {len(puts_ittm)}\n")
+                lines.append(f"- Put-OTM: {len(puts_otm)}\n")
+                lines.append("")  # Leere Zeile
                 
-                        # Calls-Section
-                        lines.append("## Calls\n")
-                        lines.append("| Moneyness | Expiry | Strike | Bid | Ask | Delta |\n")
-                        lines.append("|-----------|--------|--------|-----|-----|-------\n")
-                        for r in rows:
-                            if r['expiry'] == exp and r['right'] == 'C':
-                                lines.append(
-                                    f"| {r['moneyness']:<11} | {str(r['expiry']):<12} | {r['strike']:>7.1f} | "
-                                    f"{r['bid']} | {r['ask']} | {r['delta']}\n"
-                                )
-                        lines.append("\n")
-                
-                        # Puts-Section
-                        lines.append("## Puts\n")
-                        lines.append("| Moneyness | Expiry | Strike | Bid | Ask | Delta |\n")
-                        lines.append("|-----------|--------|--------|-----|-----|-------\n")
-                        for r in rows:
-                            if r['expiry'] == exp and r['right'] == 'P':
-                                lines.append(
-                                    f"| {r['moneyness']} | {str(r['expiry']):<12} | {r['strike']:>7.1f} | "
-                                    f"{r['bid']} | {r['ask']} | {r['delta']}\n"
-                                )
-                        lines.append("\n")
-                
-                    # Zusammenfassungstabelle für alle Verfallsdaten
-                    lines.append("## Langfristige Optionenkette (#1)\n")
-                    lines.append("| Verfallsdatum | Calls-ITM | Calls-OTM | Puts-ITM | Puts-OTM | # | Verfallsdatum | Calls-ITM | Calls-OTM | Puts-ITM | Puts-OTM |\n")
-                    lines.append("|------------|----------|----------|---------|---------|------|------------|----------|----------|---------|---------|\n")
-                    for exp in selected_exps:
-                        calls_ittm = [r for r in rows if r['expiry'] == exp and r['right'] == 'C' and r['moneyness'] == 'ITM']
-                        calls_otm = [r for r in rows if r['expiry'] == exp and r['right'] == 'C' and r['moneyness'] == 'OTM']
-                        puts_ittm = [r for r in rows if r['expiry'] == exp and r['right'] == 'P' and r['moneyness'] == 'ITM']
-                        puts_otm = [r for r in rows if r['expiry'] == exp and r['right'] == 'P' and r['moneyness'] == 'OTM']
+                # Calls-Section
+                lines.append("## Calls\n")
+                lines.append("| Moneyness | Expiry | Strike | Bid | Ask | Delta |\n")
+                lines.append("|-----------|--------|--------|-----|-----|-------|\n")
+                for r in rows:
+                    if r['expiry'] == exp and r['right'] == 'C':
                         lines.append(
-                            f"| {exp.upper()} | {len(calls_ittm)} | {len(calls_otm)} | {len(puts_ittm)} | {len(puts_otm)} | {len(rows)} | "
-                            f"{exp.upper()} | {len(calls_ittm)} | {len(calls_otm)} | {len(puts_ittm)} | {len(puts_otm)} |\n"
+                            f"| {r['moneyness']:<11} | {str(r['expiry']):<12} | {r['strike']:>7.1f} | "
+                            f"{r['bid']} | {r['ask']} | {r['delta']}\n"
                         )
+                lines.append("\n")
+                
+                # Puts-Section
+                lines.append("## Puts\n")
+                lines.append("| Moneyness | Expiry | Strike | Bid | Ask | Delta |\n")
+                lines.append("|-----------|--------|--------|-----|-----|-------|\n")
+                for r in rows:
+                    if r['expiry'] == exp and r['right'] == 'P':
+                        lines.append(
+                            f"| {r['moneyness']} | {str(r['expiry']):<12} | {r['strike']:>7.1f} | "
+                            f"{r['bid']} | {r['ask']} | {r['delta']}\n"
+                        )
+                lines.append("\n")
+                
+                # Zusammenfassungstabelle für alle Verfallsdaten
+                lines.append("## Langfristige Optionenkette (#1)\n")
+                lines.append("| Verfallsdatum | Calls-ITM | Calls-OTM | Puts-ITM | Puts-OTM | # | Verfallsdatum | Calls-ITM | Calls-OTM | Puts-ITM | Puts-OTM |\n")
+                lines.append("|------------|----------|----------|---------|---------|------|------------|----------|----------|---------|---------|\n")
+                for exp2 in selected_exps:
+                    calls_ittm2 = [r for r in rows if r['expiry'] == exp2 and r['right'] == 'C' and r['moneyness'] == 'ITM']
+                    calls_otm2 = [r for r in rows if r['expiry'] == exp2 and r['right'] == 'C' and r['moneyness'] == 'OTM']
+                    puts_ittm2 = [r for r in rows if r['expiry'] == exp2 and r['right'] == 'P' and r['moneyness'] == 'ITM']
+                    puts_otm2 = [r for r in rows if r['expiry'] == exp2 and r['right'] == 'P' and r['moneyness'] == 'OTM']
+                    lines.append(
+                        f"| {exp2.upper()} | {len(calls_ittm2)} | {len(calls_otm2)} | {len(puts_ittm2)} | {len(puts_otm2)} | {len(rows)} | "
+                        f"{exp2.upper()} | {len(calls_ittm2)} | {len(calls_otm2)} | {len(puts_ittm2)} | {len(puts_otm2)} |\n"
+                    )
+            
+            # Schreibe Markdown-Datei
+            md_path = f"/home/hermes/{ticker_symbol.lower()}_options_18days.md"
+            with open(md_path, 'w') as f:
+                f.write(''.join(lines))
+            print(f"[OK] Markdown: {md_path}")
 
         # Kurzes Summary auf Konsole
         print("\n=== SUMMARY ===")
