@@ -274,25 +274,25 @@ def write_markdown_output(rows: List, ticker_symbol: str, selected_exps: List,
             
             # Calls-Section
             lines.append("## Calls\n")
-            lines.append("| Moneyness | Expiry | Strike | Bid | Ask | Volume | Open Interest | Delta |\n")
-            lines.append("|-----------|--------|--------|-----|-----|-------|--------------|--------------|-------|\n")
+            lines.append("| Moneyness | Expiry | Strike | Bid | Ask | Delta |\n")
+            lines.append("|-----------|--------|--------|-----|-----|-------|\n")
             for r in rows:
                 if r['expiry'] == exp and r['right'] == 'C':
                     lines.append(
                         f"| {r['moneyness']:<11} | {str(r['expiry']):<12} | {r['strike']:>7.1f} | "
-                        f"{r['bid']} | {r['ask']} | {r['volume']} | {r['open_interest']} | {r['delta']}\n"
+                        f"{r['bid']} | {r['ask']} | {r['delta']}\n"
                     )
             lines.append("\n")
             
             # Puts-Section
             lines.append("## Puts\n")
-            lines.append("| Moneyness | Expiry | Strike | Bid | Ask | Volume | Open Interest | Delta |\n")
-            lines.append("|-----------|--------|--------|-----|-----|-------|--------------|--------------|-------|\n")
+            lines.append("| Moneyness | Expiry | Strike | Bid | Ask | Delta |\n")
+            lines.append("|-----------|--------|--------|-----|-----|-------|\n")
             for r in rows:
                 if r['expiry'] == exp and r['right'] == 'P':
                     lines.append(
                         f"| {r['moneyness']} | {str(r['expiry']):<12} | {r['strike']:>7.1f} | "
-                        f"{r['bid']} | {r['ask']} | {r['volume']} | {r['open_interest']} | {r['delta']}\n"
+                        f"{r['bid']} | {r['ask']} | {r['delta']}\n"
                     )
             lines.append("\n")
             
